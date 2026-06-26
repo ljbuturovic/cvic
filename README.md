@@ -28,6 +28,36 @@ or with uv:
 uv tool install cvic
 ```
 
+## Run from source (reproduce the manuscript)
+
+The project is fully managed by [uv](https://docs.astral.sh/uv/) with a committed `uv.lock`, so the exact dependency versions are reproducible across machines. You need an NVIDIA GPU with a reasonably recent driver to use CUDA; the PyTorch wheels bundle their own CUDA runtime, so **no system CUDA toolkit installation is required** and you do not pick a CUDA version — `uv` resolves the right wheel for your platform automatically.
+
+```bash
+git clone https://github.com/ljbuturovic/cvic.git
+cd cvic
+uv sync                       # creates .venv and installs the locked dependencies
+source .venv/bin/activate     # now `cvic` and `tunic` are on your PATH
+```
+
+Verify the GPU is visible:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+Then run the commands directly (no `uv run` prefix needed once the venv is activated):
+
+```bash
+cvic --smoke-test
+tunic --smoke-test
+```
+
+To run the test suite:
+
+```bash
+pytest tests/ -k "not test_smoke"
+```
+
 ## Quick start
 
 **Hold-out tuning:**
