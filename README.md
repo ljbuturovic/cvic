@@ -11,10 +11,8 @@ Built on [Ray Tune](https://docs.ray.io/en/latest/tune/index.html), [Optuna](htt
 
 It ships two commands:
 
-- **`tunic`** — hold-out hyperparameter tuning (single train/validation split).
-- **`cvic`** — k-fold cross-validation hyperparameter search (for smaller datasets where a single split is noisy).
-
-> This is the local subset of [krunic](https://github.com/ljbuturovic/krunic). The cloud launcher (SkyPilot/AWS) lives in krunic; cvic runs entirely on your own machine.
+- **`cvic`** — k-fold cross-validation hyperparameter search
+- - **`tunic`** — hold-out hyperparameter tuning (single train/validation split)
 
 ## Install
 
@@ -28,7 +26,7 @@ or with uv:
 uv tool install cvic
 ```
 
-## Run from source (reproduce the manuscript)
+## Run from source
 
 The project is fully managed by [uv](https://docs.astral.sh/uv/) with a committed `uv.lock`, so the exact dependency versions are reproducible across machines. You need an NVIDIA GPU with a reasonably recent driver to use CUDA; the PyTorch wheels bundle their own CUDA runtime, so **no system CUDA toolkit installation is required** and you do not pick a CUDA version — `uv` resolves the right wheel for your platform automatically.
 
