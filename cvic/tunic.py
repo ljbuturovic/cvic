@@ -991,7 +991,9 @@ def run_final(args):
     num_classes = results.get("num_classes")
     data_root = args.data if args.data else results.get("dataset", ".")
     data_path = Path(data_root)
-    epochs = args.epochs or results.get("epochs", 30)
+    # Prefer the winning trial's tuned epoch count (present only under
+    # --tune-epochs); otherwise fall back to args.epochs / results epochs.
+    epochs = params.get("epochs") or args.epochs or results.get("epochs", 30)
     batch_size = params.get("batch_size", args.batch_size)
 
     validate_dataset_path(data_path)
@@ -1159,6 +1161,7 @@ def run_smoke_test(args):
             repro=False,
             workers=0,
             img_size=64,
+            tune_epochs=getattr(args, "tune_epochs", False),
             freeze_backbone=0,
             training_fraction=1.0,
             val_fraction=1.0,
@@ -1502,6 +1505,10 @@ def run_tuning(args):
     hp_keys = ["lr", "weight_decay", "label_smoothing", "drop_rate",
                "randaugment_magnitude", "randaugment_num_ops",
                "mixup_alpha", "cutmix_alpha", "optimizer", "batch_size"]
+    if args.tune_epochs:
+        # When epochs are tuned, carry the winning epoch count into best_params
+        # so run_final retrains for it (mirrors cvic's epochs-in-hp_keys behavior).
+        hp_keys = ["epochs"] + hp_keys
 
     use_gpu = _ck().get_device(args.device).type == "cuda"
 
@@ -1536,12 +1543,33 @@ def run_tuning(args):
         batch_size_value = args.batch_size
         logger.info(f"Batch size fixed to {args.batch_size}")
 
+    # Epochs: fixed at args.epochs by default. With --tune-epochs, tune over
+    # [epochs_min, epochs_max] (default [min(10, epochs), epochs]) exactly as
+    # cvic does, so the hold-out search space matches the cross-validation one.
+    if args.tune_epochs:
+        epochs_min = ss.get("epochs_min", min(10, args.epochs))
+        epochs_max = ss.get("epochs_max", args.epochs)
+        if epochs_min > epochs_max:
+            logger.error(
+                f"epochs_min ({epochs_min}) > epochs_max ({epochs_max}); "
+                "raise --epochs or set epochs_min in --search-space."
+            )
+            sys.exit(1)
+        if epochs_min == epochs_max:
+            epochs_value = epochs_min
+            logger.info(f"Epochs fixed to {epochs_value} (min == max)")
+        else:
+            epochs_value = tune.randint(epochs_min, epochs_max + 1)
+            logger.info(f"Epochs will be tuned over [{epochs_min}, {epochs_max}]")
+    else:
+        epochs_value = args.epochs
+
     search_space = {
         "data": data_key,
         "data_format": data_format,
         "model": args.model,
         "pretrained": args.pretrained,
-        "epochs": args.epochs,
+        "epochs": epochs_value,
         "batch_size": batch_size_value,
         "img_size": args.img_size,
         "freeze_backbone": args.freeze_backbone,
@@ -1774,7 +1802,12 @@ def parse_args():
     p.add_argument("--n-trials", type=int, default=80, dest="n_trials",
                    help="Number of Optuna trials")
     p.add_argument("--epochs", type=int, default=30,
-                   help="Training epochs per trial")
+                   help="Training epochs per trial (upper bound when --tune-epochs)")
+    p.add_argument("--tune-epochs", action="store_true", dest="tune_epochs",
+                   help="Tune the number of epochs as a hyperparameter over "
+                        "[min(10, --epochs), --epochs] (override via epochs_min/epochs_max "
+                        "in --search-space), matching cvic's search space. "
+                        "Default off: epochs fixed at --epochs.")
     p.add_argument("--batch-size", type=int, default=None, dest="batch_size",
                    help="Batch size (default: tune over 16, 32, 64, 128; if specified, use as fixed value)")
     p.add_argument("--prefix", type=str, default="tunic",
