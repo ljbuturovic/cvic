@@ -1502,10 +1502,13 @@ def run_tuning(args):
         logger.info(f"Using dataset normalization: pool_mean={norm_params.get('pool_mean'):.2f}, "
                    f"pool_std={norm_params.get('pool_std'):.2f}")
 
+    # Defensive: some callers (tests, smoke test) build a bare Namespace.
+    tune_epochs = getattr(args, "tune_epochs", False)
+
     hp_keys = ["lr", "weight_decay", "label_smoothing", "drop_rate",
                "randaugment_magnitude", "randaugment_num_ops",
                "mixup_alpha", "cutmix_alpha", "optimizer", "batch_size"]
-    if args.tune_epochs:
+    if tune_epochs:
         # When epochs are tuned, carry the winning epoch count into best_params
         # so run_final retrains for it (mirrors cvic's epochs-in-hp_keys behavior).
         hp_keys = ["epochs"] + hp_keys
@@ -1546,7 +1549,7 @@ def run_tuning(args):
     # Epochs: fixed at args.epochs by default. With --tune-epochs, tune over
     # [epochs_min, epochs_max] (default [min(10, epochs), epochs]) exactly as
     # cvic does, so the hold-out search space matches the cross-validation one.
-    if args.tune_epochs:
+    if tune_epochs:
         epochs_min = ss.get("epochs_min", min(10, args.epochs))
         epochs_max = ss.get("epochs_max", args.epochs)
         if epochs_min > epochs_max:
