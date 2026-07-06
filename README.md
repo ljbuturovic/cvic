@@ -3,7 +3,7 @@
 [![tests](https://github.com/ljbuturovic/cvic/actions/workflows/test.yml/badge.svg)](https://github.com/ljbuturovic/cvic/actions/workflows/test.yml)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Local, automated hyperparameter search for image classifiers — from dataset to tuned model with one command, distributed across your local GPUs.
+Local, automated hyperparameter search for image classifiers - from dataset to tuned model with one command, distributed across your local GPUs.
 
 cvic uses off-the-shelf models and packages, so you won't get SOTA performance. But it can get surprisingly close, with almost zero effort. Useful as a baseline, or for experimentation with architectures and GPUs.
 
@@ -12,7 +12,7 @@ Built on [Ray Tune](https://docs.ray.io/en/latest/tune/index.html), [Optuna](htt
 It ships two commands:
 
 - **`cvic`** — k-fold cross-validation hyperparameter search
-- - **`tunic`** — hold-out hyperparameter tuning (single train/validation split)
+- **`tunic`** — hold-out hyperparameter tuning (single train/validation split)
 
 ## Install
 
