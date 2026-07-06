@@ -456,7 +456,7 @@ def run_cv(args):
 
     hp_keys = ["epochs", "lr", "weight_decay", "label_smoothing", "drop_rate",
                "randaugment_magnitude", "randaugment_num_ops",
-               "mixup_alpha", "cutmix_alpha", "optimizer"]
+               "mixup_alpha", "cutmix_alpha", "optimizer", "batch_size"]
 
     epochs_min = ss.get("epochs_min", min(10, args.epochs))
     epochs_max = ss.get("epochs_max", args.epochs)

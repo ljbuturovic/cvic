@@ -194,6 +194,7 @@ def test_smoke_cvic(tmp_path):
     assert "best_val_acc" in result
     assert result["n_folds"] == 2
     assert result["completed_trials"] == 1
+    assert result["best_params"]["batch_size"] == 4
 
 
 @pytest.mark.parametrize("pooling", [False, True])
