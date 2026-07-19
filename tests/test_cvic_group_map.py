@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from cvic.common_cvic import _groups_for_samples, _load_group_map
 from cvic.cvic import parse_args, run_cv
 
 
@@ -46,6 +47,17 @@ def test_cli_group_map(monkeypatch):
                         ["cvic", "--data", "/tmp", "--model", "resnet18",
                          "--group-map", "/tmp/manifest.csv"])
     assert parse_args().group_map == "/tmp/manifest.csv"
+
+
+def test_group_map_requires_complete_cvic_sample_coverage(tmp_path):
+    manifest = _make_grouped_imagefolder(tmp_path)
+    group_map = _load_group_map(str(manifest))
+    del group_map[next(iter(group_map))]
+
+    from torchvision import datasets
+    ds = datasets.ImageFolder(str(tmp_path / "train"))
+    with pytest.raises(SystemExit, match="missing 1 image"):
+        _groups_for_samples(ds.samples, group_map, f"{tmp_path}/train")
 
 
 def test_run_cv_with_group_map_end_to_end(tmp_path):

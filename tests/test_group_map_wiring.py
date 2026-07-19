@@ -106,6 +106,50 @@ def test_build_loaders_group_map_yields_lesion_disjoint_split(tmp_path):
     assert train_groups.isdisjoint(val_groups), "a lesion straddled train/val despite --group-map"
 
 
+def test_build_loaders_group_map_requires_complete_coverage(tmp_path):
+    mapping, manifest = _make_grouped_imagefolder(tmp_path)
+    group_map = _load_group_map(str(manifest))
+    del group_map[next(iter(mapping))]
+
+    with pytest.raises(SystemExit, match="missing 1 image"):
+        _build_loaders(
+            tmp_path, batch_size=4, workers=0, seed=1,
+            train_tf=ToTensor(), val_tf=ToTensor(),
+            training_fraction=0.7, val_fraction=0.3,
+            group_map=group_map,
+        )
+
+
+def test_build_loaders_existing_val_rejects_group_overlap(tmp_path):
+    for split in ("train", "val"):
+        for cls in ("benign", "malignant"):
+            d = tmp_path / split / cls
+            d.mkdir(parents=True)
+            Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(d / f"{cls}_{split}.jpg")
+
+    shared_train = tmp_path / "train" / "benign" / "shared_train.jpg"
+    shared_val = tmp_path / "val" / "benign" / "shared_val.jpg"
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(shared_train)
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(shared_val)
+
+    group_map = {
+        "benign_train": "benign_train",
+        "malignant_train": "malignant_train",
+        "benign_val": "benign_val",
+        "malignant_val": "malignant_val",
+        "shared_train": "shared_lesion",
+        "shared_val": "shared_lesion",
+    }
+
+    with pytest.raises(SystemExit, match="spanning train and validation"):
+        _build_loaders(
+            tmp_path, batch_size=2, workers=0, seed=1,
+            train_tf=ToTensor(), val_tf=ToTensor(),
+            training_fraction=1.0, val_fraction=1.0,
+            group_map=group_map,
+        )
+
+
 def test_build_loaders_without_group_map_leaks_groups(tmp_path):
     """Contrast: the identical data with no map splits some lesion across
     train/val — the leakage the feature exists to prevent."""

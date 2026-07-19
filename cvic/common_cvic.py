@@ -113,6 +113,33 @@ def _load_group_map(path):
     return mapping
 
 
+def _groups_for_samples(samples, group_map: dict, context: str):
+    """Return group ids for ImageFolder samples, requiring full map coverage."""
+    if group_map is None:
+        return None
+    missing = sorted({Path(p).stem for p, _ in samples if Path(p).stem not in group_map})
+    if missing:
+        preview = ", ".join(missing[:5])
+        more = "" if len(missing) <= 5 else f", ... (+{len(missing) - 5} more)"
+        sys.exit(
+            f"--group-map is missing {len(missing)} image(s) from {context}: "
+            f"{preview}{more}. Refusing to fall back to per-image singleton groups."
+        )
+    return [group_map[Path(p).stem] for p, _ in samples]
+
+
+def _assert_group_disjoint(train_groups, val_groups, context: str):
+    """Fail if any group appears on both sides of an existing split."""
+    overlap = sorted(set(train_groups) & set(val_groups))
+    if overlap:
+        preview = ", ".join(map(str, overlap[:5]))
+        more = "" if len(overlap) <= 5 else f", ... (+{len(overlap) - 5} more)"
+        sys.exit(
+            f"--group-map detected {len(overlap)} group(s) spanning train and "
+            f"validation in {context}: {preview}{more}."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------

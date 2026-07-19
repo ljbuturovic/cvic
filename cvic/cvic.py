@@ -149,10 +149,8 @@ def _cvic_trial(config: dict):
         base_ds_clean = datasets.ImageFolder(str(train_dir), transform=val_tf)
         all_labels = [label for _, label in base_ds_aug.samples]
         if group_map is not None:
-            # Per-sample group id; images absent from the map fall back to a
-            # singleton group (their own stem), so folds stay group-disjoint.
-            groups = [group_map.get(Path(p).stem, Path(p).stem)
-                      for p, _ in base_ds_aug.samples]
+            groups = ck._groups_for_samples(
+                base_ds_aug.samples, group_map, f"{data_path}/train")
 
     N = len(base_ds_aug)
 
@@ -485,6 +483,8 @@ def run_cv(args):
         logger.error("--group-map is not supported for webdataset format yet; "
                      "grouped datasets (e.g. BHAM) use ImageFolder.")
         sys.exit(1)
+    if group_map is not None:
+        ck._groups_for_samples(tmp_ds.samples, group_map, f"{data_path}/train")
 
     ss = {}
     if args.search_space:

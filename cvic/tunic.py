@@ -389,9 +389,15 @@ def _build_loaders(data_path: Path, batch_size: int, workers: int, seed: int,
     import torch
     from torch.utils.data import DataLoader, Subset
     from torchvision import datasets
+    ck = _ck()
 
     train_dir = data_path / "train"
     val_dir = data_path / "val"
+
+    def _selected_samples(ds):
+        if isinstance(ds, Subset):
+            return [ds.dataset.samples[i] for i in ds.indices]
+        return ds.samples
 
     if val_dir.exists():
         eff_val_frac = val_fraction if val_fraction is not None else 1.0
@@ -407,6 +413,13 @@ def _build_loaders(data_path: Path, batch_size: int, workers: int, seed: int,
             n_before = len(val_dataset)
             val_dataset = _subsample(val_dataset, eff_val_frac, seed)
             logger.info(f"Using {len(val_dataset)}/{n_before} val samples (val_fraction={eff_val_frac})")
+
+        if group_map is not None:
+            train_groups = ck._groups_for_samples(
+                _selected_samples(train_dataset), group_map, f"{data_path}/train")
+            val_groups = ck._groups_for_samples(
+                _selected_samples(val_dataset), group_map, f"{data_path}/val")
+            ck._assert_group_disjoint(train_groups, val_groups, str(data_path))
 
     else:
         if val_fraction is None:
@@ -448,10 +461,9 @@ def _build_loaders(data_path: Path, batch_size: int, workers: int, seed: int,
             class_to_idxs[lbl].append(i)
         item_group = None
         if group_map is not None:
-            # Map each sample index to its group id; images absent from the map
-            # fall back to a singleton group (their own stem), i.e. ungrouped.
-            item_group = {i: group_map.get(Path(p).stem, Path(p).stem)
-                          for i, (p, _) in enumerate(base_dataset.samples)}
+            group_ids = ck._groups_for_samples(
+                base_dataset.samples, group_map, f"{data_path}/train")
+            item_group = {i: group_ids[i] for i in range(len(group_ids))}
         train_indices, val_indices, _ = _split_by_label(
             class_to_idxs, training_fraction, eff_val_frac, seed, item_group=item_group)
 
@@ -1544,6 +1556,14 @@ def run_tuning(args):
         logger.error("--group-map is not supported for webdataset format yet; "
                      "grouped datasets (e.g. BHAM) use ImageFolder.")
         sys.exit(1)
+    if group_map is not None:
+        train_samples = datasets.ImageFolder(str(Path(data_key) / "train")).samples
+        train_groups = ck._groups_for_samples(train_samples, group_map, f"{data_key}/train")
+        val_dir = Path(data_key) / "val"
+        if val_dir.exists():
+            val_samples = datasets.ImageFolder(str(val_dir)).samples
+            val_groups = ck._groups_for_samples(val_samples, group_map, f"{data_key}/val")
+            ck._assert_group_disjoint(train_groups, val_groups, data_key)
 
     _preflight_check_distribution(data_format, data_key, num_classes,
                                   args.training_fraction, args.val_fraction, args.seed)
