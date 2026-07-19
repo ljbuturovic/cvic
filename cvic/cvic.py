@@ -46,6 +46,34 @@ def _compute_metric(probs, labels, metric: str) -> float:
     return ck._compute_auroc(probs, labels)
 
 
+def _make_folds(n_samples: int, labels, n_folds: int, stratified: bool,
+                seed: int, groups=None):
+    """Build CV folds as a list of (train_idx, val_idx) index arrays.
+
+    Single seam for cross-validation splitting. With groups=None this reproduces
+    the historical StratifiedKFold / KFold behavior exactly (frozen by
+    tests/test_cv_folds.py). When groups is given (a sequence parallel to
+    labels), every sample sharing a group id is kept together in one fold, so no
+    group is ever split across train/val — the leakage protection required for
+    lesion-grouped datasets like BHAM, where one lesion contributes several
+    images.
+    """
+    from sklearn.model_selection import (
+        StratifiedKFold, KFold, StratifiedGroupKFold, GroupKFold)
+    idx = range(n_samples)
+    if groups is None:
+        if stratified:
+            kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+            return list(kf.split(idx, labels))
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
+        return list(kf.split(idx))
+    if stratified:
+        kf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+        return list(kf.split(idx, labels, groups))
+    kf = GroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    return list(kf.split(idx, labels, groups))
+
+
 def _cvic_trial(config: dict):
     """CV trial: trains one model per fold, reports aggregated metric to Ray Tune."""
     import numpy as np
@@ -55,7 +83,6 @@ def _cvic_trial(config: dict):
     from torchvision import datasets
     import ray
     from ray import tune
-    from sklearn.model_selection import StratifiedKFold, KFold
     ck = _ck()
     set_seed        = ck.set_seed
     get_device      = ck.get_device
@@ -93,6 +120,7 @@ def _cvic_trial(config: dict):
     optimizer_name     = config["optimizer"]
     use_amp            = config.get("use_amp", False)
     freeze_bb          = config["freeze_backbone"]
+    group_map          = config.get("group_map")
 
     _counter = ray.get_actor("trial_counter")
     _trial_num = ray.get(_counter.next.remote())
@@ -106,6 +134,7 @@ def _cvic_trial(config: dict):
 
     # Detect format and load data
     fmt = _detect_format(str(data_path))
+    groups = None
     if fmt == "webdataset":
         logger.info("Loading WebDataset format")
         # Decode images ONCE; apply the transform lazily so augmentation is re-sampled
@@ -119,6 +148,11 @@ def _cvic_trial(config: dict):
         base_ds_aug   = datasets.ImageFolder(str(train_dir), transform=train_tf)
         base_ds_clean = datasets.ImageFolder(str(train_dir), transform=val_tf)
         all_labels = [label for _, label in base_ds_aug.samples]
+        if group_map is not None:
+            # Per-sample group id; images absent from the map fall back to a
+            # singleton group (their own stem), so folds stay group-disjoint.
+            groups = [group_map.get(Path(p).stem, Path(p).stem)
+                      for p, _ in base_ds_aug.samples]
 
     N = len(base_ds_aug)
 
@@ -133,12 +167,8 @@ def _cvic_trial(config: dict):
             repeat_seed = base_seed + repeat * 10000
             set_seed(repeat_seed)
 
-            if stratified:
-                kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=repeat_seed)
-                splits = list(kf.split(range(N), all_labels))
-            else:
-                kf = KFold(n_splits=n_folds, shuffle=True, random_state=repeat_seed)
-                splits = list(kf.split(range(N)))
+            splits = _make_folds(N, all_labels, n_folds, stratified, repeat_seed,
+                                 groups=groups)
 
             for fold_idx, (train_idx, val_idx) in enumerate(splits):
                 fold_seed = repeat_seed + fold_idx
@@ -450,6 +480,12 @@ def run_cv(args):
 
     use_gpu = _uses_ray_gpu(args.device)
 
+    group_map = ck._load_group_map(getattr(args, "group_map", None))
+    if group_map is not None and fmt == "webdataset":
+        logger.error("--group-map is not supported for webdataset format yet; "
+                     "grouped datasets (e.g. BHAM) use ImageFolder.")
+        sys.exit(1)
+
     ss = {}
     if args.search_space:
         ss = load_search_space_overrides(args.search_space)
@@ -492,6 +528,7 @@ def run_cv(args):
         "stratified":        args.stratified,
         "pooling":           args.pooling,
         "tune_metric":       args.tune_metric,
+        "group_map":         group_map,
         "lr":                    tune.loguniform(ss.get("lr_min", 1e-5),    ss.get("lr_max", 1e-1)),
         "weight_decay":          tune.loguniform(ss.get("wd_min", 1e-6),    ss.get("wd_max", 1e-2)),
         "label_smoothing":       tune.uniform(   ss.get("ls_min", 0.0),     ss.get("ls_max", 0.2)),
@@ -728,6 +765,11 @@ def parse_args():
                    help="Number of times to repeat the full CV with different random splits")
     p.add_argument("--stratified", action=argparse.BooleanOptionalAction, default=True,
                    help="Use stratified (class-balanced) folds")
+    p.add_argument("--group-map", type=str, default=None, dest="group_map",
+                   help="CSV mapping each image to a group id (e.g. build_bham.py's "
+                        "split_manifest.csv: image_id,lesion_id). When set, CV folds "
+                        "keep every group on one side (no leakage of a lesion across "
+                        "folds). ImageFolder format only.")
     p.add_argument("--pooling",   action="store_true", default=False,
                    help="Pool out-of-fold predictions and compute metric once (default: average per-fold metrics)")
     p.add_argument("--tune-metric", type=str, default="val_auroc", dest="tune_metric",

@@ -150,36 +150,90 @@ def _read_train_sample_labels(data_root: str, meta: dict, classes: list[str]) ->
 
 
 def _split_by_label(by_label, training_fraction: float, val_fraction: float,
-                    seed: int) -> tuple[list, list, dict]:
-    """Per-class stratified disjoint split. Items may be keys or indices."""
+                    seed: int, item_group=None) -> tuple[list, list, dict]:
+    """Per-class stratified disjoint split. Items may be keys or indices.
+
+    With item_group=None this is a plain per-item split (frozen by
+    tests/test_split_golden.py). When item_group is given (a mapping item ->
+    group id), whole groups are assigned atomically so no group is ever split
+    across train/val — the leakage protection for grouped datasets like BHAM,
+    where one lesion contributes several images. Group-aware splitting requires
+    class-pure groups (all of a group's items share one label); a group that
+    spans classes raises ValueError rather than leaking silently.
+    """
     import random
+    from collections import defaultdict, OrderedDict
     rng = random.Random(seed)
+
+    if item_group is not None:
+        group_labels: dict = defaultdict(set)
+        for label in by_label:
+            for it in by_label[label]:
+                group_labels[item_group[it]].add(label)
+        straddling = [g for g, labs in group_labels.items() if len(labs) > 1]
+        if straddling:
+            raise ValueError(
+                f"{len(straddling)} group(s) span multiple classes; stratified "
+                "group-aware holdout requires class-pure groups (e.g. one lesion "
+                "-> one label). Dedupe or use a non-stratified split.")
+
     train_items: list = []
     val_items: list = []
     dist: dict = {}
     for label in sorted(by_label):
         items = list(by_label[label])
-        rng.shuffle(items)
         n_total = len(items)
         n_tr = max(1, int(round(n_total * training_fraction)))
         n_va = max(1, int(round(n_total * val_fraction)))
         if n_tr + n_va > n_total:
             n_va = max(1, n_total - n_tr)
-        train_items.extend(items[:n_tr])
-        val_items.extend(items[n_tr:n_tr + n_va])
-        dist[label] = {"total": n_total, "train": n_tr, "val": n_va}
+
+        if item_group is None:
+            rng.shuffle(items)
+            tr, va = items[:n_tr], items[n_tr:n_tr + n_va]
+        else:
+            # Group items within this class, shuffle whole groups, then fill
+            # val to its target first (so val is never empty) and train next;
+            # atomic groups mean realized counts only approximate the targets.
+            grouped: dict = OrderedDict()
+            for it in items:
+                grouped.setdefault(item_group[it], []).append(it)
+            group_ids = list(grouped.keys())
+            rng.shuffle(group_ids)
+            tr, va = [], []
+            for gid in group_ids:
+                members = grouped[gid]
+                if len(va) < n_va:
+                    va.extend(members)
+                elif len(tr) < n_tr:
+                    tr.extend(members)
+                # else: held-out remainder (matches the fractional design)
+            if not tr and len(group_ids) >= 2:
+                # degenerate: val absorbed everything — hand the last group to train
+                moved = grouped[group_ids[-1]]
+                va = [x for x in va if x not in set(moved)]
+                tr = list(moved)
+
+        train_items.extend(tr)
+        val_items.extend(va)
+        dist[label] = {"total": n_total, "train": len(tr), "val": len(va)}
     return train_items, val_items, dist
 
 
 def _stratified_disjoint_split(samples: list[tuple[str, int]],
                                 training_fraction: float, val_fraction: float,
-                                seed: int) -> tuple[set[str], set[str], dict]:
-    """Stratified disjoint split of (key, label) pairs into train/val key sets."""
+                                seed: int, item_group=None) -> tuple[set[str], set[str], dict]:
+    """Stratified disjoint split of (key, label) pairs into train/val key sets.
+
+    item_group (item -> group id) is passed through to _split_by_label for
+    group-aware, leakage-safe splitting; None keeps the plain per-item split.
+    """
     from collections import defaultdict
     by_label: dict[int, list[str]] = defaultdict(list)
     for key, label in samples:
         by_label[label].append(key)
-    train_keys, val_keys, dist = _split_by_label(by_label, training_fraction, val_fraction, seed)
+    train_keys, val_keys, dist = _split_by_label(
+        by_label, training_fraction, val_fraction, seed, item_group=item_group)
     return set(train_keys), set(val_keys), dist
 
 
@@ -326,8 +380,12 @@ def _subsample(dataset, fraction: float, seed: int):
 def _build_loaders(data_path: Path, batch_size: int, workers: int, seed: int,
                    train_tf, val_tf, collate_fn=None,
                    training_fraction: float = 1.0, val_fraction: float | None = None,
-                   require_val: bool = True):
-    """Build train/val DataLoaders, creating a disjoint stratified split if val/ is absent."""
+                   require_val: bool = True, group_map=None):
+    """Build train/val DataLoaders, creating a disjoint stratified split if val/ is absent.
+
+    group_map (image stem -> group id), when given, makes the no-val-dir split
+    group-aware so no group (e.g. one lesion's images) straddles train/val.
+    """
     import torch
     from torch.utils.data import DataLoader, Subset
     from torchvision import datasets
@@ -380,23 +438,22 @@ def _build_loaders(data_path: Path, batch_size: int, workers: int, seed: int,
         eff_val_frac = val_fraction
 
         from collections import defaultdict
-        import random as _random
         logger.warning("No val/ directory — splitting train/ using training_fraction and val_fraction (disjoint)")
         base_dataset = datasets.ImageFolder(str(train_dir))
 
+        # Single shared stratified-split seam (also used by the webdataset path
+        # via _stratified_disjoint_split). Indices act as the per-sample keys.
         class_to_idxs = defaultdict(list)
         for i, (_, lbl) in enumerate(base_dataset.samples):
             class_to_idxs[lbl].append(i)
-
-        train_indices, val_indices = [], []
-        rng = _random.Random(seed)
-        for lbl in sorted(class_to_idxs):
-            idxs = list(class_to_idxs[lbl])
-            rng.shuffle(idxs)
-            n_tr = max(1, round(len(idxs) * training_fraction))
-            n_va = max(1, round(len(idxs) * eff_val_frac))
-            train_indices.extend(idxs[:n_tr])
-            val_indices.extend(idxs[n_tr:n_tr + n_va])
+        item_group = None
+        if group_map is not None:
+            # Map each sample index to its group id; images absent from the map
+            # fall back to a singleton group (their own stem), i.e. ungrouped.
+            item_group = {i: group_map.get(Path(p).stem, Path(p).stem)
+                          for i, (p, _) in enumerate(base_dataset.samples)}
+        train_indices, val_indices, _ = _split_by_label(
+            class_to_idxs, training_fraction, eff_val_frac, seed, item_group=item_group)
 
         train_base = datasets.ImageFolder(str(train_dir), transform=train_tf)
         val_base = datasets.ImageFolder(str(train_dir), transform=val_tf)
@@ -595,6 +652,7 @@ def train_func_distributed(config: dict):
         data_path, batch_size, dataloader_workers, split_seed,
         train_tf, val_tf, collate_fn,
         training_fraction=training_fraction, val_fraction=val_fraction,
+        group_map=config.get("group_map"),
     )
     train_loader = ray.train.torch.prepare_data_loader(train_loader)
     val_loader = ray.train.torch.prepare_data_loader(val_loader)
@@ -710,7 +768,8 @@ def _tune_trial(config: dict):
             data_root, bs, workers, split_seed, train_tf, val_tf, collate_fn, tf, vf)
     else:
         train_loader, val_loader, _ = _build_loaders(
-            data_path, bs, workers, split_seed, train_tf, val_tf, collate_fn, tf, vf)
+            data_path, bs, workers, split_seed, train_tf, val_tf, collate_fn, tf, vf,
+            group_map=config.get("group_map"))
 
     try:
         model = create_model(config["model"], num_classes, config["pretrained"], drop_rate)
@@ -1479,6 +1538,13 @@ def run_tuning(args):
     n_train_est = int(n_train_total * args.training_fraction) if n_train_total else None
 
     logger.info(f"Dataset: {data_root} | Format: {data_format} | Classes: {num_classes} | Model: {args.model}")
+
+    group_map = ck._load_group_map(getattr(args, "group_map", None))
+    if group_map is not None and data_format == "webdataset":
+        logger.error("--group-map is not supported for webdataset format yet; "
+                     "grouped datasets (e.g. BHAM) use ImageFolder.")
+        sys.exit(1)
+
     _preflight_check_distribution(data_format, data_key, num_classes,
                                   args.training_fraction, args.val_fraction, args.seed)
 
@@ -1586,6 +1652,7 @@ def run_tuning(args):
         "n_trials": args.n_trials,
         "shuffle_seed": args.shuffle,
         "normalization": norm_params,
+        "group_map": group_map,
         "lr":                    tune.loguniform(ss.get("lr_min", 1e-5),    ss.get("lr_max", 1e-1)),
         "weight_decay":          tune.loguniform(ss.get("wd_min", 1e-6),    ss.get("wd_max", 1e-2)),
         "label_smoothing":       tune.uniform(   ss.get("ls_min", 0.0),     ss.get("ls_max", 0.2)),
@@ -1836,6 +1903,11 @@ def parse_args():
                         "Without val/ dir: REQUIRED — fraction of total training images reserved for "
                         "validation (disjoint from training set); "
                         "--training-fraction + --val-fraction must be ≤ 1.0.")
+    p.add_argument("--group-map", type=str, default=None, dest="group_map",
+                   help="CSV mapping each image to a group id (e.g. build_bham.py's "
+                        "split_manifest.csv: image_id,lesion_id). When set, the "
+                        "train/val split keeps every group on one side (no leakage of "
+                        "a lesion across train/val). ImageFolder format only.")
     p.add_argument("--freeze-backbone", type=int, default=0, dest="freeze_backbone",
                    help="Epochs to freeze backbone; 0 = no freeze")
     p.add_argument("--final", type=str, default=None,

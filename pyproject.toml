@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cvic"
-version = "0.1.4"
+version = "1.0.0"
 description = "Local hyperparameter optimization of image classifiers using cross-validation + Ray Tune + timm"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,7 @@ dependencies = [
     "ray[train,tune]>=2.54.0",
     "scikit-learn>=1.8.0",
     "scipy>=1.18.0",
+    "statsmodels>=0.14.6",
     "timm>=1.0.25",
     "torch>=2.0.0",
     "torchvision>=0.15.0",

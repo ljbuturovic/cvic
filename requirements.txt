@@ -113,8 +113,10 @@ numpy==2.5.0
     #   matplotlib
     #   optuna
     #   pandas
+    #   patsy
     #   scikit-learn
     #   scipy
+    #   statsmodels
     #   tensorboardx
     #   torchvision
     #   webdataset
@@ -168,11 +170,15 @@ packaging==26.2
     #   optuna
     #   pytest
     #   ray
+    #   statsmodels
     #   tensorboardx
 pandas==3.0.3
     # via
     #   cvic
     #   ray
+    #   statsmodels
+patsy==1.0.2
+    # via statsmodels
 pillow==12.2.0
     # via
     #   cvic
@@ -231,6 +237,7 @@ scipy==1.18.0
     # via
     #   cvic
     #   scikit-learn
+    #   statsmodels
 setuptools==81.0.0
     # via torch
 shellingham==1.5.4
@@ -241,6 +248,8 @@ sqlalchemy==2.0.51
     # via
     #   alembic
     #   optuna
+statsmodels==0.14.6
+    # via cvic
 sympy==1.14.0
     # via torch
 tensorboardx==2.6.5

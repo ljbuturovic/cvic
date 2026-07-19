@@ -10,7 +10,6 @@ import numpy as np
 import timm
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.transforms import RandAugment
 
@@ -72,22 +71,46 @@ def validate_dataset_path(data_path: Path):
         sys.exit(1)
 
 
-def make_stratified_split(dataset, val_fraction: float = 0.2, seed: int = 42):
-    from collections import defaultdict
-    class_to_indices = defaultdict(list)
-    for idx, (_, label) in enumerate(dataset.samples):
-        class_to_indices[label].append(idx)
+def _load_group_map(path):
+    """Load a per-image group map (image stem -> group id) from a CSV, or None.
 
-    train_indices, val_indices = [], []
-    rng = random.Random(seed)
-    for label, indices in class_to_indices.items():
-        indices = list(indices)
-        rng.shuffle(indices)
-        split = max(1, int(len(indices) * val_fraction))
-        val_indices.extend(indices[:split])
-        train_indices.extend(indices[split:])
-
-    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+    Shared by tunic (holdout) and cvic (cross-validation) for group-aware,
+    leakage-safe splitting: all images sharing a group id (e.g. every
+    dermatoscopy image of one HAM10000 lesion) are kept on the same side of the
+    train/val split or in the same CV fold. Accepts a plain 2-column CSV, or a
+    wider file with recognizable headers — for BHAM point it straight at
+    build_bham.py's split_manifest.csv (image_id, lesion_id, ...). Image ids are
+    reduced to their filename stem so a bare id or one with an extension both
+    match on-disk files.
+    """
+    if not path:
+        return None
+    import csv
+    KEY_COLS = ("image_id", "id", "filename", "stem", "key")
+    GROUP_COLS = ("lesion_id", "group_id", "group", "patient_id")
+    mapping: dict = {}
+    with open(path, newline="") as fh:
+        rows = iter(csv.reader(fh))
+        header = next(rows, None)
+        if header is None:
+            sys.exit(f"--group-map file is empty: {path}")
+        hdr = [h.strip().lower() for h in header]
+        key_i = next((hdr.index(c) for c in KEY_COLS if c in hdr), None)
+        grp_i = next((hdr.index(c) for c in GROUP_COLS if c in hdr), None)
+        if key_i is None or grp_i is None:
+            key_i, grp_i = 0, 1          # no known header: first two columns are data
+            data_rows = [header] + list(rows)
+        else:
+            data_rows = rows
+        for r in data_rows:
+            if len(r) <= max(key_i, grp_i):
+                continue
+            mapping[Path(r[key_i].strip()).stem] = r[grp_i].strip()
+    if not mapping:
+        sys.exit(f"--group-map produced no entries: {path}")
+    logger.info(f"Loaded group map: {len(mapping)} images -> "
+                f"{len(set(mapping.values()))} groups from {path}")
+    return mapping
 
 
 # ---------------------------------------------------------------------------

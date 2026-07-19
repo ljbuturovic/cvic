@@ -157,41 +157,6 @@ def test_build_transforms_normalized():
 
 
 # ---------------------------------------------------------------------------
-# make_stratified_split
-# ---------------------------------------------------------------------------
-
-def test_make_stratified_split_sizes(tmp_path):
-    from torchvision import datasets
-    from cvic.common_cvic import make_stratified_split
-    # Build a tiny imagefolder with 3 classes, 10 images each
-    for cls in ["a", "b", "c"]:
-        d = tmp_path / cls
-        d.mkdir()
-        for i in range(10):
-            from PIL import Image
-            Image.fromarray(np.random.randint(0, 255, (8, 8, 3), dtype=np.uint8)).save(d / f"{i}.jpg")
-    ds = datasets.ImageFolder(str(tmp_path))
-    train, val = make_stratified_split(ds, val_fraction=0.2, seed=42)
-    assert len(train) + len(val) == 30
-    assert len(val) == pytest.approx(6, abs=3)  # ~20% of 30
-
-
-def test_make_stratified_split_reproducible(tmp_path):
-    from torchvision import datasets
-    from cvic.common_cvic import make_stratified_split
-    for cls in ["a", "b"]:
-        d = tmp_path / cls
-        d.mkdir()
-        for i in range(10):
-            from PIL import Image
-            Image.fromarray(np.random.randint(0, 255, (8, 8, 3), dtype=np.uint8)).save(d / f"{i}.jpg")
-    ds = datasets.ImageFolder(str(tmp_path))
-    _, val1 = make_stratified_split(ds, val_fraction=0.2, seed=42)
-    _, val2 = make_stratified_split(ds, val_fraction=0.2, seed=42)
-    assert list(val1.indices) == list(val2.indices)
-
-
-# ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
 
@@ -506,9 +471,14 @@ def test_preflight_wds_no_val_split_stratified(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_shuffle_split_behavior(tmp_path):
-    """Without shuffle all trials share the same split; with shuffle each gets a unique one."""
+    """Without shuffle all trials share the same split; with shuffle each gets a unique one.
+
+    Exercises the real split seam (_split_by_label) that both the imagefolder
+    and webdataset no-val-dir paths route through.
+    """
+    from collections import defaultdict
     from torchvision import datasets
-    from cvic.common_cvic import make_stratified_split
+    from cvic.tunic import _split_by_label
     from PIL import Image
 
     for cls in ["a", "b", "c"]:
@@ -519,19 +489,22 @@ def test_shuffle_split_behavior(tmp_path):
                 np.random.randint(0, 255, (8, 8, 3), dtype=np.uint8)
             ).save(d / f"{i}.jpg")
     ds = datasets.ImageFolder(str(tmp_path))
+    by_label = defaultdict(list)
+    for idx, (_, lbl) in enumerate(ds.samples):
+        by_label[lbl].append(idx)
 
     base_seed = 42
     shuffle_seed = 100
 
     # No shuffle: both trials derive split from the same base_seed
-    _, val_t1 = make_stratified_split(ds, seed=base_seed)
-    _, val_t2 = make_stratified_split(ds, seed=base_seed)
-    assert val_t1.indices == val_t2.indices
+    _, val_t1, _ = _split_by_label(by_label, 0.8, 0.2, seed=base_seed)
+    _, val_t2, _ = _split_by_label(by_label, 0.8, 0.2, seed=base_seed)
+    assert val_t1 == val_t2
 
     # With shuffle: trial 1 uses shuffle_seed+1, trial 2 uses shuffle_seed+2
-    _, val_s1 = make_stratified_split(ds, seed=shuffle_seed + 1)
-    _, val_s2 = make_stratified_split(ds, seed=shuffle_seed + 2)
-    assert val_s1.indices != val_s2.indices
+    _, val_s1, _ = _split_by_label(by_label, 0.8, 0.2, seed=shuffle_seed + 1)
+    _, val_s2, _ = _split_by_label(by_label, 0.8, 0.2, seed=shuffle_seed + 2)
+    assert val_s1 != val_s2
 
 
 # ---------------------------------------------------------------------------
