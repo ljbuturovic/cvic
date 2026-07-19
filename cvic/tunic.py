@@ -600,8 +600,14 @@ def _evaluate_distributed(model, loader, criterion, device, world_size: int):
 # Ray Train worker function
 # ---------------------------------------------------------------------------
 
-def train_func_distributed(config: dict):
-    """Ray Train worker function. Receives all hyperparams + fixed config as a dict."""
+def train_func_distributed(config: dict, group_map=None):
+    """Ray Train worker function. Receives all hyperparams + fixed config as a dict.
+
+    Currently unused (the live trainable is _tune_trial). If revived, thread
+    group_map in via tune.with_parameters like _tune_trial does — never via config,
+    which no longer carries it (a config.get here would silently disable the
+    lesion-disjoint split).
+    """
     import torch.nn as nn
     import ray
     import ray.train
@@ -664,7 +670,7 @@ def train_func_distributed(config: dict):
         data_path, batch_size, dataloader_workers, split_seed,
         train_tf, val_tf, collate_fn,
         training_fraction=training_fraction, val_fraction=val_fraction,
-        group_map=config.get("group_map"),
+        group_map=group_map,
     )
     train_loader = ray.train.torch.prepare_data_loader(train_loader)
     val_loader = ray.train.torch.prepare_data_loader(val_loader)
@@ -721,8 +727,13 @@ def train_func_distributed(config: dict):
 # Ray Tune plain-function trainable (single GPU/CPU per trial, no DDP)
 # ---------------------------------------------------------------------------
 
-def _tune_trial(config: dict):
-    """Plain Ray Tune trainable. Each trial runs on one GPU (or CPU)."""
+def _tune_trial(config: dict, group_map=None):
+    """Plain Ray Tune trainable. Each trial runs on one GPU (or CPU).
+
+    group_map (image stem -> lesion/group id) is injected via
+    tune.with_parameters, NOT through config: Ray logs every config key per
+    trial, which would dump the full ~10k-entry map into each trial's log.
+    """
     import torch
     import torch.nn as nn
     import ray
@@ -781,7 +792,7 @@ def _tune_trial(config: dict):
     else:
         train_loader, val_loader, _ = _build_loaders(
             data_path, bs, workers, split_seed, train_tf, val_tf, collate_fn, tf, vf,
-            group_map=config.get("group_map"))
+            group_map=group_map)
 
     try:
         model = create_model(config["model"], num_classes, config["pretrained"], drop_rate)
@@ -1672,7 +1683,6 @@ def run_tuning(args):
         "n_trials": args.n_trials,
         "shuffle_seed": args.shuffle,
         "normalization": norm_params,
-        "group_map": group_map,
         "lr":                    tune.loguniform(ss.get("lr_min", 1e-5),    ss.get("lr_max", 1e-1)),
         "weight_decay":          tune.loguniform(ss.get("wd_min", 1e-6),    ss.get("wd_max", 1e-2)),
         "label_smoothing":       tune.uniform(   ss.get("ls_min", 0.0),     ss.get("ls_max", 0.2)),
@@ -1684,8 +1694,14 @@ def run_tuning(args):
         "optimizer":             tune.choice(    ss.get("optimizers",       ["AdamW", "SGD"])),
     }
 
+    # Pass the (potentially ~10k-entry) group_map to trials via with_parameters
+    # instead of param_space/config: Ray pretty-prints every config key per trial,
+    # so a config-borne map would dump the whole manifest into each trial's log.
+    trial_fn = _tune_trial
+    if group_map is not None:
+        trial_fn = tune.with_parameters(_tune_trial, group_map=group_map)
     trainable = tune.with_resources(
-        _tune_trial,
+        trial_fn,
         resources={"GPU": 1 if use_gpu else 0, "CPU": max(1, args.workers)},
     )
 

@@ -74,8 +74,13 @@ def _make_folds(n_samples: int, labels, n_folds: int, stratified: bool,
     return list(kf.split(idx, labels, groups))
 
 
-def _cvic_trial(config: dict):
-    """CV trial: trains one model per fold, reports aggregated metric to Ray Tune."""
+def _cvic_trial(config: dict, group_map=None):
+    """CV trial: trains one model per fold, reports aggregated metric to Ray Tune.
+
+    group_map (image stem -> lesion/group id) is injected via
+    tune.with_parameters, NOT through config: Ray logs every config key per
+    trial, which would dump the full ~10k-entry map into each trial's log.
+    """
     import numpy as np
     import torch
     import torch.nn as nn
@@ -120,7 +125,6 @@ def _cvic_trial(config: dict):
     optimizer_name     = config["optimizer"]
     use_amp            = config.get("use_amp", False)
     freeze_bb          = config["freeze_backbone"]
-    group_map          = config.get("group_map")
 
     _counter = ray.get_actor("trial_counter")
     _trial_num = ray.get(_counter.next.remote())
@@ -528,7 +532,6 @@ def run_cv(args):
         "stratified":        args.stratified,
         "pooling":           args.pooling,
         "tune_metric":       args.tune_metric,
-        "group_map":         group_map,
         "lr":                    tune.loguniform(ss.get("lr_min", 1e-5),    ss.get("lr_max", 1e-1)),
         "weight_decay":          tune.loguniform(ss.get("wd_min", 1e-6),    ss.get("wd_max", 1e-2)),
         "label_smoothing":       tune.uniform(   ss.get("ls_min", 0.0),     ss.get("ls_max", 0.2)),
@@ -540,8 +543,14 @@ def run_cv(args):
         "optimizer":             tune.choice(    ss.get("optimizers",       ["AdamW", "SGD"])),
     }
 
+    # Pass the (potentially ~10k-entry) group_map to trials via with_parameters
+    # instead of param_space/config: Ray pretty-prints every config key per trial,
+    # so a config-borne map would dump the whole manifest into each trial's log.
+    trial_fn = _cvic_trial
+    if group_map is not None:
+        trial_fn = tune.with_parameters(_cvic_trial, group_map=group_map)
     trainable = tune.with_resources(
-        _cvic_trial,
+        trial_fn,
         resources={"GPU": 1 if use_gpu else 0, "CPU": max(1, args.workers)},
     )
 
