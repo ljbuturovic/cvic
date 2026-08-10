@@ -451,6 +451,18 @@ def run_cv(args):
         logger.error("--model is required. E.g. --model resnet18")
         sys.exit(1)
 
+    # Guard count-like flags here too (not just at argparse): run_cv is also called
+    # programmatically with a Namespace. A non-positive --repeats would run an empty
+    # repeat loop and report nan (or divide by zero when pooling).
+    if args.repeats < 1:
+        logger.error(f"--repeats must be a positive integer (>= 1), got {args.repeats}")
+        sys.exit(1)
+    # Cross-validation needs at least 2 folds (sklearn's *KFold require n_splits >= 2);
+    # _positive_int already rejects 0/negatives at parse time, so this catches folds=1.
+    if args.folds < 2:
+        logger.error(f"--folds must be at least 2 for cross-validation, got {args.folds}")
+        sys.exit(1)
+
     data_root = args.data
     data_path = Path(data_root)
     validate_dataset_path(data_path)
@@ -729,6 +741,24 @@ def run_cv(args):
 # CLI
 # ---------------------------------------------------------------------------
 
+def _positive_int(value):
+    """argparse type: a strictly positive integer (>= 1).
+
+    ``type=int`` alone accepts 0 and negatives, which for count-like flags such as
+    ``--repeats`` would silently produce a no-op run (an empty repeat loop yields
+    nan / a divide-by-zero on the pooled probabilities). This rejects them up front
+    with a clear message instead.
+    """
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer (>= 1), got {ivalue}")
+    return ivalue
+
+
 def parse_args():
     from importlib.metadata import version as _version, PackageNotFoundError
     try:
@@ -768,10 +798,10 @@ def parse_args():
                    help="Number of Optuna trials")
     p.add_argument("--epochs",    type=int, default=30,
                    help="Upper bound for tunable epochs (default range: 10..--epochs); override via --search-space (epochs_min/epochs_max)")
-    p.add_argument("--folds",     type=int, default=5,
-                   help="Number of CV folds")
-    p.add_argument("--repeats",   type=int, default=1,
-                   help="Number of times to repeat the full CV with different random splits")
+    p.add_argument("--folds",     type=_positive_int, default=5,
+                   help="Number of CV folds (>= 2)")
+    p.add_argument("--repeats",   type=_positive_int, default=1,
+                   help="Number of times to repeat the full CV with different random splits (>= 1)")
     p.add_argument("--stratified", action=argparse.BooleanOptionalAction, default=True,
                    help="Use stratified (class-balanced) folds")
     p.add_argument("--group-map", type=str, default=None, dest="group_map",
