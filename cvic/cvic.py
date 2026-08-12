@@ -158,11 +158,11 @@ def _cvic_trial(config: dict, group_map=None):
 
     N = len(base_ds_aug)
 
-    # probs_accum[i] sums out-of-fold softmax probs for sample i across repeats
-    probs_accum  = np.zeros((N, num_classes), dtype=np.float64)
     labels_arr   = np.array(all_labels)
-    fold_aurocs  = []   # per-fold AUROC (non-pooling)
-    fold_accs    = []   # per-fold accuracy (non-pooling)
+    fold_aurocs  = []   # per-fold AUROC     (default: metric-averaged over R x k folds)
+    fold_accs    = []   # per-fold accuracy  (default)
+    oof_aurocs   = []   # per-repeat full-dev pooled OOF AUROC    (--pooling)
+    oof_accs     = []   # per-repeat full-dev pooled OOF accuracy (--pooling)
 
     try:
         for repeat in range(n_repeats):
@@ -171,6 +171,10 @@ def _cvic_trial(config: dict, group_map=None):
 
             splits = _make_folds(N, all_labels, n_folds, stratified, repeat_seed,
                                  groups=groups)
+
+            # Fresh per-repeat OOF buffer: this repeat's folds partition the dev
+            # set once, so every sample gets exactly one held-out prediction here.
+            probs_repeat = np.zeros((N, num_classes), dtype=np.float64) if pooling else None
 
             for fold_idx, (train_idx, val_idx) in enumerate(splits):
                 fold_seed = repeat_seed + fold_idx
@@ -231,7 +235,7 @@ def _cvic_trial(config: dict, group_map=None):
                 fold_labels_np = np.array(fold_labels)
 
                 if pooling:
-                    probs_accum[val_idx] += fold_probs_np
+                    probs_repeat[val_idx] = fold_probs_np
                 else:
                     fold_aurocs.append(_compute_metric(fold_probs_np, fold_labels_np, "auroc"))
                     fold_accs.append(_compute_metric(fold_probs_np, fold_labels_np, "acc"))
@@ -240,13 +244,21 @@ def _cvic_trial(config: dict, group_map=None):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
+            if pooling:
+                # One full-dev AUROC per repeat (single-fold models, no ensembling).
+                oof_aurocs.append(_compute_metric(probs_repeat, labels_arr, "auroc"))
+                oof_accs.append(_compute_metric(probs_repeat, labels_arr, "acc"))
+
         if pooling:
-            probs_final = probs_accum / n_repeats
-            auroc = _compute_metric(probs_final, labels_arr, "auroc")
-            acc   = _compute_metric(probs_final, labels_arr, "acc")
+            # Mean over repeats of the per-repeat pooled OOF metric; the spread
+            # across repeats is the partition-uncertainty band.
+            auroc    = float(np.nanmean(oof_aurocs))
+            acc      = float(np.nanmean(oof_accs))
+            auroc_sd = float(np.nanstd(oof_aurocs)) if len(oof_aurocs) > 1 else 0.0
         else:
-            auroc = float(np.nanmean(fold_aurocs))
-            acc   = float(np.nanmean(fold_accs))
+            auroc    = float(np.nanmean(fold_aurocs))
+            acc      = float(np.nanmean(fold_accs))
+            auroc_sd = float("nan")
         metric_val = auroc if "auroc" in tune_metric else acc
 
     except torch.cuda.OutOfMemoryError:
@@ -254,9 +266,12 @@ def _cvic_trial(config: dict, group_map=None):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         metric_val = auroc = acc = 0.0
+        auroc_sd = float("nan")
 
     # Report both genuine metrics so either can be read downstream.
-    tune.report({tune_metric: metric_val, "val_auroc": auroc, "val_acc": acc})
+    # val_auroc_sd is the across-repeat spread under --pooling (nan otherwise).
+    tune.report({tune_metric: metric_val, "val_auroc": auroc,
+                 "val_acc": acc, "val_auroc_sd": auroc_sd})
 
 
 def _evaluate_on_test_data(train_data_path: Path, test_data_path, best_params: dict, args):
@@ -583,6 +598,7 @@ def run_cv(args):
             self.completed.append({
                 "val_acc":   trial.last_result.get("val_acc"),
                 "val_auroc": trial.last_result.get("val_auroc"),
+                "val_auroc_sd": trial.last_result.get("val_auroc_sd"),
                 args.tune_metric: trial.last_result.get(args.tune_metric),
                 "params":    {k: trial.config[k] for k in hp_keys if k in trial.config},
                 "status":    trial.status,
@@ -594,6 +610,7 @@ def run_cv(args):
             snapshot = {
                 "best_val_acc":     best.get("val_acc"),
                 "best_val_auroc":   best.get("val_auroc"),
+                "best_val_auroc_sd": best.get("val_auroc_sd"),
                 "best_params":      best.get("params", {}),
                 "completed_trials": len(self.completed),
                 "model":            args.model,
@@ -659,6 +676,7 @@ def run_cv(args):
     best_metric   = best.metrics[args.tune_metric]
     best_val_acc   = best.metrics.get("val_acc",   float("nan"))
     best_val_auroc = best.metrics.get("val_auroc", float("nan"))
+    best_val_auroc_sd = best.metrics.get("val_auroc_sd", float("nan"))
     best_params    = {k: best.config[k] for k in hp_keys if k in best.config}
 
     all_trials = []
@@ -673,6 +691,7 @@ def run_cv(args):
         all_trials.append({
             "val_acc":       r.metrics.get("val_acc")   if r.metrics else None,
             "val_auroc":     r.metrics.get("val_auroc") if r.metrics else None,
+            "val_auroc_sd":  r.metrics.get("val_auroc_sd") if r.metrics else None,
             args.tune_metric: r.metrics.get(args.tune_metric) if r.metrics else None,
             "params":        {k: r.config[k] for k in hp_keys if k in r.config} if r.config else {},
             "state":         state,
@@ -698,6 +717,7 @@ def run_cv(args):
     output = {
         "best_val_acc":        best_val_acc,
         "best_val_auroc":      best_val_auroc,
+        "best_val_auroc_sd":   best_val_auroc_sd,
         f"best_{args.tune_metric}": best_metric,
         "best_params":         best_params,
         "model":               args.model,
@@ -810,7 +830,10 @@ def parse_args():
                         "keep every group on one side (no leakage of a lesion across "
                         "folds). ImageFolder format only.")
     p.add_argument("--pooling",   action="store_true", default=False,
-                   help="Pool out-of-fold predictions and compute metric once (default: average per-fold metrics)")
+                   help="Pool each repeat's out-of-fold predictions into one full-dev "
+                        "AUROC, then average those across repeats (reports "
+                        "best_val_auroc_sd as the across-repeat spread). "
+                        "Default: average per-fold metrics over all folds x repeats.")
     p.add_argument("--tune-metric", type=str, default="val_auroc", dest="tune_metric",
                    help="Metric for Optuna trial selection")
     p.add_argument("--batch-size",  type=int, default=32, dest="batch_size",
