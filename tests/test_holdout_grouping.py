@@ -65,13 +65,26 @@ def test_grouped_holdout_reproducible_and_seed_sensitive():
     assert (a[0], a[1]) != (c[0], c[1]), "different seed must give a different split"
 
 
-def test_grouped_holdout_rejects_class_straddling_group():
-    """A group whose items span two classes must raise, not silently leak."""
+def test_grouped_holdout_keeps_class_straddling_group_whole():
+    """A group whose items span two classes is assigned atomically, not rejected.
+
+    (Previously this raised ValueError; bret patients can have one referable and
+    one non-referable eye, so a group legitimately carries both labels. The
+    contract is now: keep the whole group on one side — never leak it, never
+    drop it.)
+    """
     by_label = {0: ["x0", "x1"], 1: ["x2", "x3"]}
     # 'x1' and 'x2' share a group id but sit in different classes.
     item_group = {"x0": "g0", "x1": "gX", "x2": "gX", "x3": "g1"}
-    with pytest.raises(ValueError, match="span multiple classes"):
-        _split_by_label(by_label, 0.8, 0.2, seed=0, item_group=item_group)
+    for seed in range(6):
+        train, val, _ = _split_by_label(by_label, 0.8, 0.2, seed=seed, item_group=item_group)
+        # no group straddles train/val
+        assert {item_group[it] for it in train}.isdisjoint({item_group[it] for it in val})
+        # the mixed group's two items land together
+        assert ("x1" in train) == ("x2" in train)
+        assert ("x1" in val) == ("x2" in val)
+        # nothing lost or duplicated
+        assert set(train).isdisjoint(val)
 
 
 def test_ungrouped_still_matches_when_item_group_none():

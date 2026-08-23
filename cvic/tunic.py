@@ -156,67 +156,92 @@ def _split_by_label(by_label, training_fraction: float, val_fraction: float,
     With item_group=None this is a plain per-item split (frozen by
     tests/test_split_golden.py). When item_group is given (a mapping item ->
     group id), whole groups are assigned atomically so no group is ever split
-    across train/val — the leakage protection for grouped datasets like BHAM,
-    where one lesion contributes several images. Group-aware splitting requires
-    class-pure groups (all of a group's items share one label); a group that
-    spans classes raises ValueError rather than leaking silently.
+    across train/val — the leakage protection for grouped datasets like BHAM
+    (one lesion -> several images) and bret (one patient -> two eyes).
+
+    Groups MAY span classes: a bret patient can have one referable eye and one
+    non-referable eye, so a patient group carries both labels. Such a group is
+    assigned by its majority item label (ties broken toward the larger label
+    index, which keeps the rarer positive class populated for stratification),
+    and all of its items travel together to the same side. Class-pure groups
+    reduce exactly to the previous per-class behavior, so the BHAM golden splits
+    in tests/test_split_golden.py stay byte-identical.
     """
     import random
-    from collections import defaultdict, OrderedDict
+    from collections import OrderedDict, Counter
     rng = random.Random(seed)
 
-    if item_group is not None:
-        group_labels: dict = defaultdict(set)
-        for label in by_label:
-            for it in by_label[label]:
-                group_labels[item_group[it]].add(label)
-        straddling = [g for g, labs in group_labels.items() if len(labs) > 1]
-        if straddling:
-            raise ValueError(
-                f"{len(straddling)} group(s) span multiple classes; stratified "
-                "group-aware holdout requires class-pure groups (e.g. one lesion "
-                "-> one label). Dedupe or use a non-stratified split.")
+    if item_group is None:
+        # Plain per-item stratified split (frozen by tests/test_split_golden.py).
+        train_items: list = []
+        val_items: list = []
+        dist: dict = {}
+        for label in sorted(by_label):
+            items = list(by_label[label])
+            n_total = len(items)
+            n_tr = max(1, int(round(n_total * training_fraction)))
+            n_va = max(1, int(round(n_total * val_fraction)))
+            if n_tr + n_va > n_total:
+                n_va = max(1, n_total - n_tr)
+            rng.shuffle(items)
+            tr, va = items[:n_tr], items[n_tr:n_tr + n_va]
+            train_items.extend(tr)
+            val_items.extend(va)
+            dist[label] = {"total": n_total, "train": len(tr), "val": len(va)}
+        return train_items, val_items, dist
 
-    train_items: list = []
-    val_items: list = []
-    dist: dict = {}
+    # Group-aware: assign whole groups atomically, stratified by a single
+    # per-group label so mixed groups never split across train/val.
+    grouped: dict = OrderedDict()      # gid -> [items across all classes], first-seen order
+    item_label: dict = {}
     for label in sorted(by_label):
-        items = list(by_label[label])
-        n_total = len(items)
+        for it in by_label[label]:
+            grouped.setdefault(item_group[it], []).append(it)
+            item_label[it] = label
+    group_strat: dict = {}
+    for gid, members in grouped.items():
+        cnt = Counter(item_label[it] for it in members)
+        # majority label; tie -> larger label index (keeps rare positives populated)
+        group_strat[gid] = max(cnt.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    strata: dict = OrderedDict()       # strat label -> [gid, ...], first-seen order
+    for gid in grouped:
+        strata.setdefault(group_strat[gid], []).append(gid)
+
+    train_items = []
+    val_items = []
+    for label in sorted(strata):
+        gids = list(strata[label])
+        rng.shuffle(gids)
+        n_total = sum(len(grouped[g]) for g in gids)
         n_tr = max(1, int(round(n_total * training_fraction)))
         n_va = max(1, int(round(n_total * val_fraction)))
         if n_tr + n_va > n_total:
             n_va = max(1, n_total - n_tr)
-
-        if item_group is None:
-            rng.shuffle(items)
-            tr, va = items[:n_tr], items[n_tr:n_tr + n_va]
-        else:
-            # Group items within this class, shuffle whole groups, then fill
-            # val to its target first (so val is never empty) and train next;
-            # atomic groups mean realized counts only approximate the targets.
-            grouped: dict = OrderedDict()
-            for it in items:
-                grouped.setdefault(item_group[it], []).append(it)
-            group_ids = list(grouped.keys())
-            rng.shuffle(group_ids)
-            tr, va = [], []
-            for gid in group_ids:
-                members = grouped[gid]
-                if len(va) < n_va:
-                    va.extend(members)
-                elif len(tr) < n_tr:
-                    tr.extend(members)
-                # else: held-out remainder (matches the fractional design)
-            if not tr and len(group_ids) >= 2:
-                # degenerate: val absorbed everything — hand the last group to train
-                moved = grouped[group_ids[-1]]
-                va = [x for x in va if x not in set(moved)]
-                tr = list(moved)
-
+        tr, va = [], []
+        for gid in gids:
+            members = grouped[gid]
+            if len(va) < n_va:
+                va.extend(members)
+            elif len(tr) < n_tr:
+                tr.extend(members)
+            # else: held-out remainder (matches the fractional design)
+        if not tr and len(gids) >= 2:
+            # degenerate: val absorbed everything — hand the last group to train
+            moved = grouped[gids[-1]]
+            mv = set(moved)
+            va = [x for x in va if x not in mv]
+            tr = list(moved)
         train_items.extend(tr)
         val_items.extend(va)
-        dist[label] = {"total": n_total, "train": len(tr), "val": len(va)}
+
+    # Report distribution by TRUE per-item label (mixed groups contribute to both).
+    tr_set, va_set = set(train_items), set(val_items)
+    dist = {}
+    for label in sorted(by_label):
+        items = by_label[label]
+        dist[label] = {"total": len(items),
+                       "train": sum(1 for it in items if it in tr_set),
+                       "val": sum(1 for it in items if it in va_set)}
     return train_items, val_items, dist
 
 

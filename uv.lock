@@ -322,7 +322,7 @@ nvtx = [
 
 [[package]]
 name = "cvic"
-version = "1.2.2"
+version = "1.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
