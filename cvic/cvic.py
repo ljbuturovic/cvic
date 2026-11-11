@@ -478,6 +478,13 @@ def run_cv(args):
         logger.error(f"--folds must be at least 2 for cross-validation, got {args.folds}")
         sys.exit(1)
 
+    # Ray Tune runs each trial in its own working directory, so a relative
+    # --data / --test-data no longer resolves inside the trial. Make them
+    # absolute now, before they flow into the per-trial config.
+    args.data = str(Path(args.data).expanduser().resolve())
+    if args.test_data:
+        args.test_data = str(Path(args.test_data).expanduser().resolve())
+
     data_root = args.data
     data_path = Path(data_root)
     validate_dataset_path(data_path)
@@ -810,8 +817,8 @@ def parse_args():
     p.add_argument("--version", action="version", version=f"%(prog)s {_ver}")
     p.add_argument("--data",    type=str, required=True,
                    help="Path to dataset root (ImageFolder layout with train/ subdirectory)")
-    p.add_argument("--model",   type=str, default=None,
-                   help="Any timm model name (e.g. resnet18, vit_small_patch16_224)")
+    p.add_argument("--model",   type=str, default="resnet18",
+                   help="Any timm model name (e.g. resnet18, vit_small_patch16_224); default: resnet18")
     p.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True,
                    help="Use timm pretrained weights")
     p.add_argument("--n-trials",  type=int, default=30, dest="n_trials",
